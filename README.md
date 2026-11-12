@@ -22,31 +22,39 @@ plus a detail window that tells you *which program* is using them. Built for peo
 | 가벼움 | 윈도우 성능 카운터를 직접 읽어서 CPU를 1% 안팎만 써요. |
 | 모니터 | 모니터 배치가 바뀌어 오버레이가 화면 밖으로 나가면 주 모니터 오른쪽 위로 돌아와요. 실행 중에 다시 켜면 큰 창이 떠요. |
 
-## 설치
+## 설치 (컴퓨터 잘 몰라도 3번이면 끝)
 
-### 방법 1: exe (가장 쉬움)
-[Releases](../../releases)에서 `ResourceMonitorOverlay.exe`를 받아서 더블클릭하면 끝이에요.
+1. **[여기를 눌러서 받기](https://github.com/echever-pixel/resource-monitor-overlay/releases/latest/download/ResourceMonitorOverlay.exe)**
+   - 브라우저가 "흔히 다운로드되는 파일이 아닙니다"라고 하면 **⋯ → 계속(보관)**을 눌러요.
+2. 받은 `ResourceMonitorOverlay.exe`를 **더블클릭**해요.
+   - 파란 창 "Windows의 PC 보호"가 뜨면 **추가 정보 → 실행**을 눌러요.
+     (돈 주고 사는 서명을 안 해서 뜨는 창이에요. 바이러스 아니에요.)
+3. 화면 오른쪽 위에 작은 창이 뜨면 끝이에요. 🎉
+   - 바탕화면에 두고 싶으면 exe를 바탕화면으로 옮기면 돼요.
 
-### 방법 2: 파이썬으로 실행
+### 방법 2: 파이썬으로 실행 (개발자용)
 1. [Python 3.10+](https://www.python.org/downloads/) 설치 (설치할 때 "Add to PATH" 체크)
 2. 이 저장소를 받아서 `run.bat` 더블클릭 (처음 한 번 `psutil`을 설치해요)
 
-## FPS 권한
+## FPS 켜기 (딸깍 한 번)
 
-FPS는 윈도우의 화면 기록(ETW)을 읽어야 해서 권한이 필요해요.
+FPS는 윈도우의 화면 기록을 읽어야 해서, **처음 한 번만** 허락이 필요해요. 앱이 알아서 물어봐요.
 
-- 처음 켜면 Intel 공식 PresentMon(0.93MB)을 [공식 GitHub 릴리스](https://github.com/GameTechDev/PresentMon/releases)에서
-  자동으로 받아요. 파일 해시(SHA-256)가 맞을 때만 써요.
-- FPS 칸에 **"권한"**이 뜨면: 오버레이 **오른쪽 클릭 → "FPS 켜기 (관리자 확인)" → 윈도우 확인 창에서 '예'**.
-  1시간 동안 재고, 끝나면 다시 누르면 돼요.
-- 매번 누르기 싫으면 **한 번만** 관리자 PowerShell에서 아래를 실행하고 로그아웃했다 들어오세요.
-  그 뒤로는 확인 창 없이 항상 재요.
+1. 처음 켜면 **"FPS를 보려면 허락이 한 번 필요해요"** 창이 저절로 떠요.
+2. **[항상 켜기 (추천)]** 클릭
+3. 파란 확인 창(사용자 계정 컨트롤)이 뜨면 **[예]** 클릭
+4. **PC를 한 번 다시 시작**하면 끝. 그다음부터는 켤 때마다 FPS가 저절로 나와요.
 
-```powershell
-Add-LocalGroupMember -SID S-1-5-32-559 -Member $env:USERNAME
-```
+- 다시 시작하기 싫으면 **[이번만 켜기]** → [예]: 지금부터 1시간 동안만 재요.
+- 창을 닫았거나 [나중에]를 눌렀으면: 오른쪽 위 작은 창에 **마우스 오른쪽 클릭 → "FPS 켜기 (권한 허락)"**.
+- FPS 칸에 뜨는 말: `받는중` = 측정 도구 받는 중(처음 한 번, 1MB) · `권한` = 위 허락 필요 · `-` = 앞에 띄운 창이 지금 화면을 안 그림
 
-(S-1-5-32-559 = 윈도우 기본 그룹 "Performance Log Users". 성능 기록을 읽을 수 있게 해 주는 그룹이에요.)
+어떤 일을 하냐면:
+- 측정 도구는 Intel 공식 PresentMon(0.93MB)이에요. [공식 GitHub 릴리스](https://github.com/GameTechDev/PresentMon/releases)에서 받고,
+  파일 지문(SHA-256)이 맞을 때만 써요.
+- [항상 켜기]는 지금 윈도우 계정을 윈도우 기본 그룹 **"Performance Log Users"**(성능 기록을 읽을 수 있는 그룹)에 넣어요.
+  관리자 권한을 주는 게 아니에요. 되돌리려면 관리자 PowerShell에서
+  `Remove-LocalGroupMember -SID S-1-5-32-559 -Member $env:USERNAME`
 
 ## 요구 사항
 

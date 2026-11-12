@@ -20,7 +20,7 @@ from ctypes import wintypes
 
 import psutil
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.0.0"
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))  # bundled files (icon)
 DATA = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ResourceMonitorOverlay")
 os.makedirs(DATA, exist_ok=True)
@@ -214,6 +214,16 @@ PRESENTMON = os.path.join(DATA, "PresentMon-2.6.0-x64.exe")
 PRESENTMON_URL = "https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe"
 PRESENTMON_SHA256 = "B2A706BC6AD475749E3B7E3409263AA1E6906D45BDCF993F6DBC0F660188F1AF"
 FPS_CSV = os.path.join(DATA, "fps_admin.csv")
+FPS_ASKED = os.path.join(DATA, "fps_asked")  # the FPS permission window pops up by itself only once
+
+
+def grant_trace_rights():
+    """Adds this Windows account to the built-in "Performance Log Users" group (SID S-1-5-32-559), which lets
+    PresentMon read frame timings without admin rights. Windows shows its own confirmation; applies after sign-in."""
+    user = ("%s\\%s" % (os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME", ""))).replace("'", "''")
+    cmd = "Add-LocalGroupMember -SID 'S-1-5-32-559' -Member '%s' -ErrorAction SilentlyContinue" % user
+    return ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", "powershell.exe", '-NoProfile -WindowStyle Hidden -Command "%s"' % cmd, None, 0) > 32
 
 
 def ensure_presentmon():
@@ -461,7 +471,7 @@ class Overlay:
         self.menu = tk.Menu(win, tearoff=0, font=(FONT, 9))
         self.menu.add_command(label="큰 창 열기", command=app.show_main)
         self.menu.add_command(label="FPS 끄기", command=app.fps.toggle)
-        self.menu.add_command(label="FPS 켜기 (관리자 확인)", command=app.fps.start_admin)
+        self.menu.add_command(label="FPS 켜기 (권한 허락)", command=app.fps_dialog)
         self.menu.add_separator()
         self.menu.add_command(label="종료", command=app.quit)
 
@@ -564,7 +574,64 @@ class App:
         self.root.focus_force()
 
     def quit(self):
-        self.root.destroy()  # the FPS task notices the stopped heartbeat and ends by itself
+        self.root.destroy()
+
+    def fps_dialog(self):
+        """A small window explaining, in plain words, how to let the app measure FPS."""
+        if getattr(self, "_fps_win", None) and self._fps_win.winfo_exists():
+            self._fps_win.lift()
+            return
+        try:
+            open(FPS_ASKED, "w").close()
+        except OSError:
+            pass
+        w = self._fps_win = tk.Toplevel(self.root)
+        w.title("FPS 켜기")
+        w.configure(bg=BG, padx=18, pady=16)
+        w.resizable(False, False)
+        w.attributes("-topmost", True)
+        try:
+            w.iconbitmap(os.path.join(HERE, "resmon.ico"))
+        except tk.TclError:
+            pass
+        self.label(w, "FPS(초당 프레임)를 보려면 허락이 한 번 필요해요", 11, FG, bold=True).pack(anchor="w")
+        self.label(w, "윈도우가 화면 기록을 아무 프로그램에나 보여 주지 않아서 그래요.", 9, DIM).pack(anchor="w", pady=(4, 12))
+        steps = ("① 아래 [항상 켜기]를 눌러요",
+                 "② 파란 확인 창이 뜨면 [예]를 눌러요",
+                 "③ PC를 한 번 다시 시작해요",
+                 "→ 그다음부터는 켤 때마다 FPS가 저절로 나와요")
+        for s in steps:
+            self.label(w, s, 10, C_GPU if s.startswith("→") else FG).pack(anchor="w", pady=1)
+        self.label(w, "다시 시작하기 싫으면 [이번만 켜기]: 지금부터 1시간 동안만 재요 (매번 [예] 필요).",
+                   8, DIM, wraplength=360, justify="left").pack(anchor="w", pady=(12, 10))
+        msg = self.label(w, "", 9, C_WARN, wraplength=360, justify="left")
+        btns = tk.Frame(w, bg=BG)
+        btns.pack(fill="x")
+
+        def always():
+            if grant_trace_rights():
+                msg.configure(text="다 됐어요! PC를 다시 시작하면 FPS가 항상 켜져요. 그 전에 보려면 [이번만 켜기]를 누르세요.")
+            else:
+                msg.configure(text="확인 창에서 [아니요]를 눌러서 허락이 안 됐어요. 다시 [항상 켜기]를 눌러 주세요.")
+            msg.pack(anchor="w", pady=(10, 0))
+
+        def once():
+            self.fps.start_admin()
+            w.destroy()
+
+        def button(text, cmd, primary=False):
+            b = tk.Button(btns, text=text, command=cmd, relief="flat", bd=0, padx=12, pady=5, cursor="hand2",
+                          font=(FONT, 9, "bold" if primary else "normal"),
+                          bg=C_GPU if primary else LINE, fg=BG if primary else FG,
+                          activebackground=C_VRAM, activeforeground=BG)
+            b.pack(side="left", padx=(0, 8))
+
+        button("항상 켜기 (추천)", always, primary=True)
+        button("이번만 켜기", once)
+        button("나중에", w.destroy)
+        w.update_idletasks()
+        x = self.root.winfo_screenwidth() // 2 - w.winfo_width() // 2
+        w.geometry("+%d+%d" % (x, int(self.root.winfo_screenheight() * 0.3)))
 
     def label(self, master, text="", size=9, color=FG, bold=False, **kw):
         return tk.Label(master, text=text, bg=master["bg"], fg=color, font=(FONT, size, "bold" if bold else "normal"), **kw)
@@ -716,6 +783,8 @@ class App:
             if self.root.state() == "normal":  # the big window is drawn only while it is open
                 self.render(snap)
             self.overlay.render(snap, self.fps.text())
+            if self.fps.state == "권한" and not os.path.exists(FPS_ASKED):  # first time only: explain by itself
+                self.fps_dialog()
         self.overlay.ensure_visible()
         if os.path.exists(SHOW_FLAG):  # the app was started again while running
             try:
