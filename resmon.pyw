@@ -840,8 +840,16 @@ if __name__ == "__main__":
         with open(SHOW_FLAG, "w") as f:
             f.write("show")
         raise SystemExit
+    # Tell Windows this app handles each monitor's scale itself. Otherwise, on PCs whose monitors use different
+    # scales (say 125% and 100%), Windows bitmap-scales the windows and paints the overlay in the wrong place
+    # while the detail window sits on the other monitor. With one monitor or equal scales nothing changes.
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled monitors
+        ok = ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # per-monitor v2, Win10 1703+
     except (AttributeError, OSError):
-        pass
+        ok = False
+    if not ok:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor, Windows 8.1+
+        except (AttributeError, OSError):
+            pass
     App().run()
