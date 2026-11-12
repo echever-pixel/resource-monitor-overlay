@@ -16,10 +16,11 @@ plus a detail window that tells you *which program* is using them. Built for peo
 |---|---|
 | 오버레이 | GPU 사용률, VRAM, CPU, RAM은 퍼센트 막대로, FPS는 숫자로 보여 줘요. 92%를 넘으면 주황색이 돼요. |
 | 조작 | 끌어서 옮기기(위치 기억), **더블클릭** = 큰 창, **오른쪽 클릭** = 메뉴(큰 창 / FPS 켜기·끄기 / 종료) |
-| 큰 창 | 프로그램별로 **사용(바쁨) 막대**와 **VRAM·RAM 차지 막대**를 따로 보여 줘요. 혼자 절반 넘게 차지하면 주황색. |
+| 큰 창 | 프로그램별로 **사용(바쁨) 막대**와 **VRAM·RAM 차지 막대**를 퍼센트와 함께 보여 줘요. 혼자 절반 넘게 차지하면 주황색. |
+| 바로 끄기 | 줄마다 🗑 버튼. 한 번 누르면 "종료?"로 바뀌고, 3초 안에 한 번 더 누르면 그 프로그램을 바로 꺼요. 윈도우 시스템 프로그램에는 버튼이 없어요. |
 | FPS | 앞에 띄운 창(게임·영상·브라우저)의 초당 프레임. Intel 공식 PresentMon을 써요. |
-| Ollama | 모델이 CPU에 올라가 있는데 GPU가 놀고 VRAM이 넉넉하면, 모델을 다시 올려서 GPU로 옮겨요(끌 수 있어요). |
 | 가벼움 | 윈도우 성능 카운터를 직접 읽어서 CPU를 1% 안팎만 써요. |
+| 모니터 | 모니터 배치가 바뀌어 오버레이가 화면 밖으로 나가면 주 모니터 오른쪽 위로 돌아와요. 실행 중에 다시 켜면 큰 창이 떠요. |
 
 ## 설치
 
@@ -51,11 +52,10 @@ Add-LocalGroupMember -SID S-1-5-32-559 -Member $env:USERNAME
 
 - Windows 10 / 11
 - NVIDIA 그래픽카드 (`nvidia-smi` 사용). 다른 그래픽카드는 GPU 줄이 비어 있을 수 있어요.
-- Ollama 기능은 Ollama가 `127.0.0.1:11434`에서 돌 때만 동작해요.
 
 ## 데이터 위치
 
-설정·기록은 `%LOCALAPPDATA%\ResourceMonitorOverlay`에만 저장해요(오버레이 위치, PresentMon, Ollama 전환 기록).
+설정·기록은 `%LOCALAPPDATA%\ResourceMonitorOverlay`에만 저장해요(오버레이 위치, PresentMon, 오류 기록).
 인터넷에는 PresentMon을 처음 받을 때만 접속해요.
 
 ## 라이선스

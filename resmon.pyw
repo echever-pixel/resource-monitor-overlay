@@ -3,9 +3,7 @@
 
 - 오버레이: 끌어서 옮기기, 더블클릭하면 큰 창(프로그램별 사용량), 오른쪽 클릭하면 메뉴.
 - FPS: Intel 공식 PresentMon으로 앞에 띄운 창의 초당 프레임을 센다. 처음 켤 때 공식 GitHub에서 자동으로 받는다.
-- Ollama 모델이 CPU에 올라가 있는데 GPU가 놀고 GPU 메모리가 넉넉하면, 모델을 내렸다가 다시 올려서 GPU로 옮긴다.
-  (Ollama는 모델을 올릴 때의 빈 GPU 메모리를 보고 자리를 정하기 때문에, GPU가 바쁠 때 올라간 모델은 CPU에 남는다.)
-Windows + NVIDIA 그래픽카드 전용. 다른 프로그램은 끄지 않는다.
+Windows + NVIDIA 그래픽카드 전용. 보기만 하고 다른 프로그램은 건드리지 않는다.
 """
 import collections
 import ctypes
@@ -22,19 +20,13 @@ from ctypes import wintypes
 
 import psutil
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))  # bundled files (icon)
 DATA = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ResourceMonitorOverlay")
 os.makedirs(DATA, exist_ok=True)
-LOG = os.path.join(DATA, "ollama_switch.log")
-OLLAMA = "http://127.0.0.1:11434"
+LOG = os.path.join(DATA, "error.log")
+SHOW_FLAG = os.path.join(DATA, "show.flag")  # a second launch drops this so the running one comes forward
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
-
-# 자동 전환 조건
-GPU_IDLE_PCT = 35      # 최근 30초 GPU 평균 사용률이 이보다 낮으면 "논다"
-GPU_SHARE_OK = 0.9     # 모델의 90% 이상이 GPU에 있으면 그대로 둔다
-VRAM_MARGIN_GB = 1.0   # 옮기고 나서도 남겨 둘 GPU 메모리
-COOLDOWN_S = 600       # 한 번 옮긴 뒤 10분은 다시 안 옮긴다
 
 BG, CARD, LINE = "#14161c", "#1d2029", "#2a2e3a"
 FG, DIM = "#e8eaf0", "#8b90a0"
@@ -47,7 +39,7 @@ NAMES = {
     "chrome": "크롬", "msedge": "엣지", "firefox": "파이어폭스", "dwm": "윈도우 화면", "explorer": "탐색기",
     "obs64": "OBS", "discord": "디스코드", "kakaotalk": "카카오톡", "node": "Node", "swarmui": "SwarmUI",
     "nvcontainer": "NVIDIA", "nvidia overlay": "NVIDIA 오버레이", "memcompression": "메모리 압축",
-    "resourcemonitoroverlay": "자원 모니터",
+    "resourcemonitoroverlay": "자원 모니터", "claude": "Claude", "codex": "Codex",
 }
 
 
@@ -62,13 +54,6 @@ def friendly(name, cmd):
         parts = [p for p in cmd.replace('"', " ").split() if p.lower().endswith((".py", ".pyw"))]
         return "파이썬 " + os.path.basename(parts[-1]) if parts else "파이썬"
     return NAMES.get(n, name.removesuffix(".exe"))
-
-
-def http_json(path, body=None, timeout=2.0):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(OLLAMA + path, data=data, headers={"Content-Type": "application/json"} if data else {})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8") or "{}")
 
 
 def log(line):
@@ -141,7 +126,7 @@ class GpuCounters:
 
 
 class Collector(threading.Thread):
-    """2초마다 GPU·CPU·Ollama 상태를 모아 snap에 넣는다."""
+    """2초마다 GPU·CPU 상태를 모아 snap에 넣는다."""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -182,7 +167,9 @@ class Collector(threading.Thread):
                     cmd = ""
                 fname = self.procs[pid] = friendly(pname, cmd)
             cpu = cpu1 / ncpu
-            r = rows.setdefault(fname, {"cpu": 0.0, "ram": 0, "gpu": 0.0, "gtype": "", "vram": 0.0, "dec": 0.0})
+            r = rows.setdefault(fname, {"cpu": 0.0, "ram": 0, "gpu": 0.0, "gtype": "", "vram": 0.0, "dec": 0.0,
+                                        "pids": [], "exe": pname.lower()})
+            r["pids"].append(pid)
             r["cpu"] += cpu
             r["ram"] += ram
             e = eng.get(pid) or {}
@@ -204,83 +191,9 @@ class Collector(threading.Thread):
 
         self.util_hist.append(gpu["util"])
         vm = psutil.virtual_memory()
-        try:
-            models = []
-            for m in http_json("/api/ps", timeout=1.5).get("models", []):
-                size, vram = float(m.get("size", 0)), float(m.get("size_vram", 0))
-                models.append({"name": m.get("name", "?"), "size": size, "vram": vram,
-                               "share": vram / size if size else 0.0})
-        except Exception:
-            models = None
         return {"t": time.time(), "rows": rows, "gpu": gpu, "gpu_avg": sum(self.util_hist) / len(self.util_hist),
                 "cpu": psutil.cpu_percent(None), "ram_used": (vm.total - vm.available) / 1024 ** 3,
-                "ram_total": vm.total / 1024 ** 3, "models": models}
-
-
-class Switcher:
-    """Ollama 모델이 CPU에 몰려 있고 GPU가 놀면 GPU로 옮긴다."""
-
-    def __init__(self):
-        self.auto = True
-        self.busy = False
-        self.last = 0.0
-        self.msg = "지켜보는 중"
-
-    @staticmethod
-    def cpu_model(snap):
-        for m in snap["models"] or []:
-            if m["share"] < GPU_SHARE_OK:
-                return m
-        return None
-
-    def check(self, snap):
-        if self.busy or not snap or snap["models"] is None:
-            return
-        m = self.cpu_model(snap)
-        if not m:
-            self.msg = "모델이 GPU에 있어요" if snap["models"] else "올라간 모델 없음"
-            return
-        need = (m["size"] - m["vram"]) / 1024 ** 3 + VRAM_MARGIN_GB
-        free = snap["gpu"]["total"] - snap["gpu"]["used"]
-        if snap["gpu_avg"] >= GPU_IDLE_PCT:
-            self.msg = "GPU가 바빠서 기다려요 (평균 %d%%)" % snap["gpu_avg"]
-        elif free < need:
-            self.msg = "GPU 메모리 부족: 남은 %.1fGB, 필요 %.1fGB" % (free, need)
-        elif time.time() - self.last < COOLDOWN_S:
-            self.msg = "방금 옮겨서 %d분 쉬어요" % ((COOLDOWN_S - (time.time() - self.last)) // 60 + 1)
-        elif self.auto:
-            self.start(m["name"], "자동: GPU 평균 %d%%, 남은 GPU 메모리 %.1fGB" % (snap["gpu_avg"], free))
-        else:
-            self.msg = "옮길 수 있어요 (자동 꺼짐)"
-
-    def start(self, name, why):
-        if self.busy:
-            return
-        self.busy, self.last = True, time.time()
-        threading.Thread(target=self._move, args=(name, why), daemon=True).start()
-
-    def _move(self, name, why):
-        try:
-            log("%s 를 GPU로 옮기기 시작 (%s)" % (name, why))
-            self.msg = "%s 내리는 중..." % name
-            http_json("/api/generate", {"model": name, "keep_alive": 0}, timeout=60)
-            for _ in range(30):
-                if not any(m.get("name") == name for m in http_json("/api/ps").get("models", [])):
-                    break
-                time.sleep(1)
-            self.msg = "%s GPU로 올리는 중..." % name
-            http_json("/api/generate", {"model": name, "keep_alive": "10m"}, timeout=300)
-            share = 0.0
-            for m in http_json("/api/ps").get("models", []):
-                if m.get("name") == name and m.get("size"):
-                    share = float(m.get("size_vram", 0)) / float(m["size"])
-            self.msg = "옮김 완료: GPU %d%%" % (share * 100)
-            log("%s 다시 올림: GPU %d%%" % (name, share * 100))
-        except Exception as ex:
-            self.msg = "옮기기 실패: %s" % type(ex).__name__
-            log("%s 옮기기 실패: %r" % (name, ex))
-        finally:
-            self.busy = False
+                "ram_total": vm.total / 1024 ** 3}
 
 
 class Bar(tk.Canvas):
@@ -557,13 +470,35 @@ class Overlay:
                x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
         return self.c.create_polygon(pts, smooth=True, **kw)
 
+    def _default_pos(self):
+        return int(self.app.root.winfo_screenwidth() - self.w - 30 * self.s), int(30 * self.s)  # main monitor, top right
+
+    def _on_screen(self, x, y):
+        """True when the overlay's middle lies on some monitor (monitors get rearranged or unplugged)."""
+        pt = wintypes.POINT(int(x + self.w / 2), int(y + self.h / 2))
+        return bool(ctypes.windll.user32.MonitorFromPoint(pt, 0))  # MONITOR_DEFAULTTONULL
+
     def _load_pos(self):
         try:
             with open(self.POS, encoding="utf-8") as f:
                 p = json.load(f)
-            return int(p["x"]), int(p["y"])
+            x, y = int(p["x"]), int(p["y"])
+            if self._on_screen(x, y):
+                return x, y
         except (OSError, ValueError, KeyError):
-            return int(self.app.root.winfo_screenwidth() - self.w - 30 * self.s), int(30 * self.s)
+            pass
+        return self._default_pos()
+
+    def ensure_visible(self):
+        """Pulls the overlay back onto the main monitor when it ended up off every screen."""
+        if not self._on_screen(self.win.winfo_x(), self.win.winfo_y()):
+            self.win.geometry("+%d+%d" % self._default_pos())
+            self._save_pos()
+
+    def bring_back(self):
+        self.win.deiconify()
+        self.ensure_visible()
+        self.win.lift()
 
     def _press(self, e):
         self._off = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
@@ -603,7 +538,6 @@ class App:
     def __init__(self):
         self.col = Collector()
         self.col.start()
-        self.sw = Switcher()
         self.fps = FpsReader()
         self.root = tk.Tk()
         self.root.title("자원 모니터")
@@ -616,6 +550,9 @@ class App:
         except tk.TclError:
             pass
         self.root.protocol("WM_DELETE_WINDOW", self.root.withdraw)  # X hides the big window; the overlay stays
+        self.mine = {os.getpid(), psutil.Process().ppid()}  # this app (and the exe launcher): never closable
+        self.armed = None      # (program name, until) after the first click on a trash button
+        self.foot_msg = None   # (text, until) shown in the footer after closing a program
         self.build()
         self.root.withdraw()
         self.overlay = Overlay(self)
@@ -668,12 +605,18 @@ class App:
             pct = self.label(box, "", 8, DIM, anchor="e", width=5)
             mbar = Bar(box, 64, mem_color, 5)
             mpct = self.label(box, "", 8, DIM, anchor="e", width=5)
+            trash = tk.Label(box, text="", bg=CARD, fg=DIM, font=("Segoe UI Emoji", 9), width=4, cursor="hand2")
             name.grid(row=i + 1, column=0, sticky="w")
             bar.grid(row=i + 1, column=1, padx=(6, 0))
             pct.grid(row=i + 1, column=2, sticky="e")
             mbar.grid(row=i + 1, column=3, padx=(10, 0))
             mpct.grid(row=i + 1, column=4, sticky="e")
-            rows.append((name, bar, pct, mbar, mpct))
+            trash.grid(row=i + 1, column=5, padx=(4, 0))
+            row = [name, bar, pct, mbar, mpct, trash, None]  # last slot: program name shown in this row
+            trash.bind("<Button-1>", lambda e, r=row: self.on_trash(r))
+            trash.bind("<Enter>", lambda e, t=trash: t.configure(fg=C_WARN))
+            trash.bind("<Leave>", lambda e, t=trash: t.configure(fg=DIM))
+            rows.append(row)
         return rows
 
     def build(self):
@@ -687,19 +630,6 @@ class App:
         self.ram_bar, self.ram_txt = self.meter(f, C_RAM)
         self.cpu_rows = self.table(f, C_CPU, C_RAM, "CPU", "RAM")
 
-        f, self.ol_title, self.ol_big = self.card("Ollama", C_WARN)
-        self.ol_msg = self.label(f, "", 9, DIM, anchor="w", justify="left", wraplength=320)
-        self.ol_msg.pack(fill="x", pady=(6, 4))
-        ctl = tk.Frame(f, bg=CARD)
-        ctl.pack(fill="x")
-        self.auto_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(ctl, text="GPU 놀면 자동으로 옮기기", variable=self.auto_var, command=self.on_auto,
-                       bg=CARD, fg=FG, selectcolor=LINE, activebackground=CARD, activeforeground=FG,
-                       font=(FONT, 9), bd=0, highlightthickness=0).pack(side="left")
-        self.move_btn = tk.Button(ctl, text="지금 GPU로", command=self.on_move, bg=LINE, fg=FG, relief="flat",
-                                  activebackground=C_VRAM, font=(FONT, 9, "bold"), padx=10, pady=2, bd=0, cursor="hand2")
-        self.move_btn.pack(side="right")
-
         foot = tk.Frame(self.root, bg=BG)
         foot.pack(fill="x", padx=12, pady=8)
         self.top_var = tk.BooleanVar(value=True)
@@ -709,39 +639,76 @@ class App:
         self.foot = self.label(foot, "모으는 중...", 8, DIM)
         self.foot.pack(side="right")
 
-    def on_auto(self):
-        self.sw.auto = self.auto_var.get()
-
     def on_top(self):
         self.root.attributes("-topmost", self.top_var.get())
 
-    def on_move(self):
-        snap = self.col.snap
-        m = Switcher.cpu_model(snap) if snap else None
-        if m is None and snap and snap["models"]:
-            m = snap["models"][0]
-        if m:
-            self.sw.start(m["name"], "버튼")
-        else:
-            self.sw.msg = "올라간 모델이 없어요"
-
-    @staticmethod
-    def fill_rows(widgets, items):
-        for i, (name, bar, pct, mbar, mpct) in enumerate(widgets):
+    def fill_rows(self, widgets, items):
+        for i, row in enumerate(widgets):
+            name, bar, pct, mbar, mpct, trash = row[:6]
             if i < len(items):
                 n, frac, mfrac = items[i]
+                row[6] = n
                 name.configure(text=n if len(n) <= 14 else n[:13] + "…")
                 for b, f, lab in ((bar, frac, pct), (mbar, mfrac, mpct)):
                     f = max(0.0, min(1.0, f))
                     b.configure(bg=LINE)
                     b.set(f, C_WARN if f > 0.5 and b is mbar else None)  # one program holding over half: orange
                     lab.configure(text="%d%%" % round(f * 100))
+                if not self.killable(n):
+                    trash.configure(text="", cursor="arrow")
+                elif self.armed and self.armed[0] == n and time.time() < self.armed[1]:
+                    trash.configure(text="종료?", fg=C_WARN, font=(FONT, 8, "bold"), cursor="hand2")
+                else:
+                    trash.configure(text="🗑", fg=DIM, font=("Segoe UI Emoji", 9), cursor="hand2")
             else:
+                row[6] = None
                 name.configure(text="")
+                trash.configure(text="", cursor="arrow")
                 for b, lab in ((bar, pct), (mbar, mpct)):
                     b.configure(bg=CARD)  # hide the empty track on unused rows
                     b.set(0)
                     lab.configure(text="")
+
+    # Windows itself and this app: never offered for closing.
+    PROTECTED = {"system", "registry", "smss", "csrss", "wininit", "winlogon", "services", "lsass", "lsaiso",
+                 "svchost", "dwm", "fontdrvhost", "memcompression", "memory compression", "explorer", "sihost",
+                 "ctfmon", "audiodg", "spoolsv", "searchindexer", "msmpeng", "securityhealthservice", "wudfhost",
+                 "taskhostw", "runtimebroker", "startmenuexperiencehost", "shellexperiencehost", "textinputhost",
+                 "resourcemonitoroverlay"}
+
+    def _pids(self, n):
+        snap = self.col.snap
+        r = snap["rows"].get(n) if snap else None
+        return (r["pids"], r["exe"]) if r else ([], "")
+
+    def killable(self, n):
+        pids, exe = self._pids(n)
+        return bool(pids) and exe.removesuffix(".exe") not in self.PROTECTED and not self.mine & set(pids)
+
+    def on_trash(self, row):
+        """Trash button: first click arms it ("종료?") for 3 seconds, a second click closes every process of that program."""
+        n = row[6]
+        if not n or not self.killable(n):
+            return
+        if not (self.armed and self.armed[0] == n and time.time() < self.armed[1]):
+            self.armed = (n, time.time() + 3)
+            row[5].configure(text="종료?", fg=C_WARN, font=(FONT, 8, "bold"))
+            return
+        self.armed = None
+        pids, _ = self._pids(n)
+        done = denied = 0
+        for pid in pids:
+            try:
+                psutil.Process(pid).kill()
+                done += 1
+            except psutil.NoSuchProcess:
+                done += 1
+            except psutil.Error:
+                denied += 1
+        msg = "%s 종료: %d개" % (n, done) + (" · 권한 없어 못 끈 것 %d개" % denied if denied else "")
+        self.foot_msg = (msg, time.time() + 6)
+        log(msg)
+        row[5].configure(text="", cursor="arrow")
 
     def tick(self):
         snap = self.col.snap
@@ -749,7 +716,14 @@ class App:
             if self.root.state() == "normal":  # the big window is drawn only while it is open
                 self.render(snap)
             self.overlay.render(snap, self.fps.text())
-            self.sw.check(snap)
+        self.overlay.ensure_visible()
+        if os.path.exists(SHOW_FLAG):  # the app was started again while running
+            try:
+                os.remove(SHOW_FLAG)
+            except OSError:
+                pass
+            self.overlay.bring_back()
+            self.show_main()
         self.root.after(1000, self.tick)
 
     def render(self, s):
@@ -782,24 +756,10 @@ class App:
                       reverse=True)
         self.fill_rows(self.cpu_rows, [(n, r["cpu"] / 100, r["ram"] / 1024 ** 3 / s["ram_total"])
                                        for n, r in rows[:self.ROWS]])
-
-        models = s["models"]
-        if models is None:
-            self.ol_title.configure(text="Ollama")
-            self.ol_big.configure(text="꺼짐", fg=DIM)
-        elif not models:
-            self.ol_title.configure(text="Ollama")
-            self.ol_big.configure(text="비어 있음", fg=DIM)
+        if self.foot_msg and time.time() < self.foot_msg[1]:
+            self.foot.configure(text=self.foot_msg[0], fg=C_WARN)
         else:
-            m = Switcher.cpu_model(s) or models[0]
-            self.ol_title.configure(text="Ollama  " + m["name"])
-            if m["share"] >= GPU_SHARE_OK:
-                self.ol_big.configure(text="GPU %d%%" % (m["share"] * 100), fg=C_OK)
-            else:
-                self.ol_big.configure(text="CPU %d%%" % ((1 - m["share"]) * 100), fg=C_WARN)
-        self.ol_msg.configure(text=self.sw.msg)
-        self.move_btn.configure(state="disabled" if self.sw.busy else "normal")
-        self.foot.configure(text=time.strftime("%H:%M:%S 갱신"))
+            self.foot.configure(text=time.strftime("%H:%M:%S 갱신"), fg=DIM)
 
     def run(self):
         self.root.mainloop()
@@ -807,7 +767,9 @@ class App:
 
 if __name__ == "__main__":
     _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\resource_monitor_overlay_single")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # already running: keep the one window
+    if ctypes.windll.kernel32.GetLastError() == 183:  # already running: ask that one to show itself, then leave
+        with open(SHOW_FLAG, "w") as f:
+            f.write("show")
         raise SystemExit
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled monitors
