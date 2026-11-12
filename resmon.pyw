@@ -656,34 +656,36 @@ class App:
         return bar, txt
 
     def table(self, master, color, mem_color, busy_title, mem_title):
-        """Rows of: name | how busy (bar) | how much memory it holds (bar) | numbers."""
+        """Rows of: name | how busy (bar, %) | how much of the memory it holds (bar, %)."""
         rows = []
         box = tk.Frame(master, bg=CARD)
         box.pack(fill="x", pady=(6, 0))
-        self.label(box, busy_title, 7, DIM).grid(row=0, column=1, sticky="w", padx=(6, 0))
-        self.label(box, mem_title, 7, DIM).grid(row=0, column=2, sticky="w", padx=(6, 0))
+        self.label(box, busy_title, 7, DIM).grid(row=0, column=1, columnspan=2, sticky="w", padx=(6, 0))
+        self.label(box, mem_title, 7, DIM).grid(row=0, column=3, columnspan=2, sticky="w", padx=(10, 0))
         for i in range(self.ROWS):
             name = self.label(box, "", 9, anchor="w", width=15)
             bar = Bar(box, 64, color, 5)
+            pct = self.label(box, "", 8, DIM, anchor="e", width=5)
             mbar = Bar(box, 64, mem_color, 5)
-            val = self.label(box, "", 8, DIM, anchor="e", width=16)
+            mpct = self.label(box, "", 8, DIM, anchor="e", width=5)
             name.grid(row=i + 1, column=0, sticky="w")
             bar.grid(row=i + 1, column=1, padx=(6, 0))
-            mbar.grid(row=i + 1, column=2, padx=(6, 0))
-            val.grid(row=i + 1, column=3, sticky="e")
-            rows.append((name, bar, mbar, val))
+            pct.grid(row=i + 1, column=2, sticky="e")
+            mbar.grid(row=i + 1, column=3, padx=(10, 0))
+            mpct.grid(row=i + 1, column=4, sticky="e")
+            rows.append((name, bar, pct, mbar, mpct))
         return rows
 
     def build(self):
         f, self.gpu_title, self.gpu_big = self.card("GPU", C_GPU)
         self.gpu_bar, self.gpu_txt = self.meter(f, C_GPU)
         self.vram_bar, self.vram_txt = self.meter(f, C_VRAM)
-        self.gpu_rows = self.table(f, C_GPU, C_VRAM, "GPU 사용", "VRAM 차지")
+        self.gpu_rows = self.table(f, C_GPU, C_VRAM, "GPU", "VRAM")
 
         f, _, self.cpu_big = self.card("CPU", C_CPU)
         self.cpu_bar, self.cpu_txt = self.meter(f, C_CPU)
         self.ram_bar, self.ram_txt = self.meter(f, C_RAM)
-        self.cpu_rows = self.table(f, C_CPU, C_RAM, "CPU 사용", "RAM 차지")
+        self.cpu_rows = self.table(f, C_CPU, C_RAM, "CPU", "RAM")
 
         f, self.ol_title, self.ol_big = self.card("Ollama", C_WARN)
         self.ol_msg = self.label(f, "", 9, DIM, anchor="w", justify="left", wraplength=320)
@@ -725,20 +727,21 @@ class App:
 
     @staticmethod
     def fill_rows(widgets, items):
-        for i, (name, bar, mbar, val) in enumerate(widgets):
+        for i, (name, bar, pct, mbar, mpct) in enumerate(widgets):
             if i < len(items):
-                n, frac, mfrac, text = items[i]
+                n, frac, mfrac = items[i]
                 name.configure(text=n if len(n) <= 14 else n[:13] + "…")
-                for b, f in ((bar, frac), (mbar, mfrac)):
+                for b, f, lab in ((bar, frac, pct), (mbar, mfrac, mpct)):
+                    f = max(0.0, min(1.0, f))
                     b.configure(bg=LINE)
                     b.set(f, C_WARN if f > 0.5 and b is mbar else None)  # one program holding over half: orange
-                val.configure(text=text)
+                    lab.configure(text="%d%%" % round(f * 100))
             else:
                 name.configure(text="")
-                for b in (bar, mbar):
+                for b, lab in ((bar, pct), (mbar, mpct)):
                     b.configure(bg=CARD)  # hide the empty track on unused rows
                     b.set(0)
-                val.configure(text="")
+                    lab.configure(text="")
 
     def tick(self):
         snap = self.col.snap
@@ -765,8 +768,7 @@ class App:
                 continue
             kind = r["gtype"] or ("디코더" if r["dec"] >= 0.5 else "")
             pct = min(100, r["gpu"] if r["gpu"] >= r["dec"] else r["dec"])
-            items.append((n, pct / 100, r["vram"] / g["total"],
-                          "%s %d%% · %.1fGB" % (kind, pct, r["vram"]) if kind else "VRAM %.1fGB" % r["vram"]))
+            items.append((n, pct / 100, r["vram"] / g["total"]))
         self.fill_rows(self.gpu_rows, items[:self.ROWS])
 
         self.cpu_big.configure(text="%d%%" % s["cpu"])
@@ -778,8 +780,7 @@ class App:
         # rank by CPU load and by RAM held, so a program sitting on 8GB of RAM shows up even while it idles
         rows = sorted(s["rows"].items(), key=lambda kv: kv[1]["cpu"] + kv[1]["ram"] / 1024 ** 3 / s["ram_total"] * 100,
                       reverse=True)
-        self.fill_rows(self.cpu_rows, [(n, r["cpu"] / 100, r["ram"] / 1024 ** 3 / s["ram_total"],
-                                        "%.1f%% · RAM %.1fGB" % (r["cpu"], r["ram"] / 1024 ** 3))
+        self.fill_rows(self.cpu_rows, [(n, r["cpu"] / 100, r["ram"] / 1024 ** 3 / s["ram_total"])
                                        for n, r in rows[:self.ROWS]])
 
         models = s["models"]
